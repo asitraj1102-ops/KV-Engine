@@ -1,3 +1,11 @@
 build/
+build-release/
+build-asan/
+output/
+*.o
+*.out
+*.exe
 *.db
+data.txt
 .vscode/
+.DS_Store
