@@ -1,4 +1,7 @@
 #include "KVStore.hpp"
+#include "ShardedKVStore.hpp"
+#include <thread>
+#include <vector>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -164,7 +167,98 @@ int main() {
         assert(db.size() == 10000);
     }
 
+    // 16. ShardedKVStore basic operations and stats
+    {
+        ShardedKVStore sdb(64, 8);
+        assert(sdb.shardCount() == 8);
+        assert(sdb.set("alpha", "100"));
+        assert(sdb.set("beta", "200"));
+        assert(sdb.get("alpha").value_or("") == "100");
+        assert(!sdb.get("missing").has_value());
+        assert(sdb.hits() == 1);
+        assert(sdb.misses() == 1);
+        assert(sdb.del("alpha"));
+        assert(!sdb.del("alpha"));
+        assert(sdb.size() == 1);
+    }
+
+    // 17. Concurrent KVStore stress test (8 threads, overlapping keys + LRU eviction)
+    {
+        KVStore db(64, "", false);
+        constexpr int numThreads = 8;
+        constexpr int opsPerThread = 1000;
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        for (int t = 0; t < numThreads; ++t) {
+            threads.emplace_back([&db, t]() {
+                for (int i = 0; i < opsPerThread; ++i) {
+                    std::string key = "shared_k" + std::to_string((t * 31 + i) % 128);
+                    db.set(key, "val_" + std::to_string(t) + "_" + std::to_string(i));
+                    (void)db.get(key);
+                    if (i % 5 == 0) {
+                        db.del(key);
+                    }
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        assert(db.size() <= 64);
+        assert(db.hits() + db.misses() == numThreads * opsPerThread);
+    }
+
+    // 18. Concurrent ShardedKVStore stress test (disjoint integrity + heavy contention)
+    {
+        ShardedKVStore sdb(32000, 16);
+        constexpr int numThreads = 8;
+        constexpr int keysPerThread = 500;
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
+
+        for (int t = 0; t < numThreads; ++t) {
+            threads.emplace_back([&sdb, t]() {
+                for (int i = 0; i < keysPerThread; ++i) {
+                    std::string key = "t" + std::to_string(t) + "_k" + std::to_string(i);
+                    std::string val = "v" + std::to_string(t) + "_" + std::to_string(i);
+                    assert(sdb.set(key, val));
+                }
+                for (int i = 0; i < keysPerThread; ++i) {
+                    std::string key = "t" + std::to_string(t) + "_k" + std::to_string(i);
+                    std::string val = "v" + std::to_string(t) + "_" + std::to_string(i);
+                    assert(sdb.get(key).value_or("") == val);
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        assert(sdb.size() == numThreads * keysPerThread);
+        assert(sdb.hits() == numThreads * keysPerThread);
+        assert(sdb.misses() == 0);
+
+        ShardedKVStore hotCache(64, 8);
+        constexpr int opsPerThread = 1000;
+        threads.clear();
+
+        for (int t = 0; t < numThreads; ++t) {
+            threads.emplace_back([&hotCache, t]() {
+                for (int i = 0; i < opsPerThread; ++i) {
+                    std::string key = "hot_" + std::to_string((t * 17 + i) % 100);
+                    hotCache.set(key, "v" + std::to_string(i));
+                    (void)hotCache.get(key);
+                    if (i % 4 == 0) {
+                        hotCache.del(key);
+                    }
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+
+        assert(hotCache.size() <= 64);
+        assert(hotCache.hits() + hotCache.misses() == numThreads * opsPerThread);
+    }
+
     cleanup(dbFile);
-    std::cout << "ALL 15 KVSTORE UNIT TESTS PASSED!\n";
+    std::cout << "ALL 18 KVSTORE UNIT TESTS PASSED!\n";
     return 0;
 }

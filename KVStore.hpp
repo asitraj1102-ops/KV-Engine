@@ -6,6 +6,7 @@
 #include <iostream>
 #include <iterator>
 #include <list>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -18,11 +19,13 @@ private:
     bool autoPersist;
     int cacheHits = 0;
     int cacheMisses = 0;
+    mutable std::mutex mtx;
 
     // Front = Most Recently Used (MRU), Back = Least Recently Used (LRU)
     std::list<std::pair<std::string, std::string>> lruList;
     std::unordered_map<std::string, std::list<std::pair<std::string, std::string>>::iterator> cacheMap;
 
+    // Private helper: caller must already hold `mtx` (prevents self-deadlock)
     void saveToDisk() const {
         if (dbFile.empty()) return;
         std::ofstream out(dbFile, std::ios::trunc);
@@ -60,9 +63,9 @@ public:
         }
     }
 
-    // SET: O(1) in-memory cache update (with optional disk flush)
     bool set(const std::string& key, const std::string& value, bool verbose = false) {
         if (key.empty() || value.empty()) return false;
+        std::lock_guard<std::mutex> lock(mtx);
 
         auto it = cacheMap.find(key);
         if (it != cacheMap.end()) {
@@ -90,8 +93,9 @@ public:
         return true;
     }
 
-    // GET: O(1) lookup + promotes key to MRU
     std::optional<std::string> get(const std::string& key, bool verbose = false) {
+        std::lock_guard<std::mutex> lock(mtx);
+
         auto it = cacheMap.find(key);
         if (it == cacheMap.end()) {
             cacheMisses++;
@@ -105,8 +109,9 @@ public:
         return it->second->second;
     }
 
-    // DEL: O(1) removal
     bool del(const std::string& key, bool verbose = false) {
+        std::lock_guard<std::mutex> lock(mtx);
+
         auto it = cacheMap.find(key);
         if (it == cacheMap.end()) {
             if (verbose) std::cout << "[ERROR] Key '" << key << "' does not exist.\n";
@@ -120,12 +125,29 @@ public:
         return true;
     }
 
-    void flush() const { saveToDisk(); }
-    std::size_t size() const { return lruList.size(); }
-    int hits() const { return cacheHits; }
-    int misses() const { return cacheMisses; }
+    void flush() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        saveToDisk();
+    }
+
+    std::size_t size() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        return lruList.size();
+    }
+
+    int hits() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        return cacheHits;
+    }
+
+    int misses() const {
+        std::lock_guard<std::mutex> lock(mtx);
+        return cacheMisses;
+    }
 
     void listAll() const {
+        std::lock_guard<std::mutex> lock(mtx);
+
         if (lruList.empty()) {
             std::cout << "(empty database)\n";
             return;
@@ -138,15 +160,17 @@ public:
     }
 
     void stats() const {
+        std::lock_guard<std::mutex> lock(mtx);
+
         int total = cacheHits + cacheMisses;
         double hitRate = (total == 0) ? 0.0 : (static_cast<double>(cacheHits) / total) * 100.0;
 
         std::cout << "=== Engine Statistics ===\n";
-        std::cout << "Active Keys   : " << lruList.size() << " / " << capacity << "\n";
-        std::cout << "Cache Hits    : " << cacheHits << "\n";
-        std::cout << "Cache Misses  : " << cacheMisses << "\n";
-        std::cout << "Hit Ratio     : " << std::fixed << std::setprecision(1) << hitRate << "%\n";
-        std::cout << "Disk File     : " << dbFile << "\n";
+        std::cout << "Active Keys  : " << lruList.size() << " / " << capacity << "\n";
+        std::cout << "Cache Hits   : " << cacheHits << "\n";
+        std::cout << "Cache Misses : " << cacheMisses << "\n";
+        std::cout << "Hit Ratio    : " << std::fixed << std::setprecision(1) << hitRate << "%\n";
+        std::cout << "Disk File    : " << dbFile << "\n";
     }
 };
 

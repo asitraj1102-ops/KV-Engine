@@ -26,9 +26,10 @@ A lightweight, persistent command-line Key-Value storage engine written in **C++
 
 ## Key Features
 - **O(1) Cache Operations:** Hash map + doubly linked list iterators for constant-time `SET`, `GET`, `DEL`, and LRU eviction.
+- **Lock-Striped Concurrency (`ShardedKVStore`):** Thread-safe `KVStore` baseline plus a 16-shard lock-striped engine with 64-byte cache-line alignment (`alignas(64)`) to prevent false sharing across CPU cores.
 - **Order-Preserving Disk Persistence:** Restores exact MRU-to-LRU cache order across restarts (`data.txt`).
 - **Telemetry & Metrics:** Live cache hits, misses, active keys, and hit ratio via `STATS`.
-- **Verified Memory Safety:** 15 automated unit tests (`CTest`) verified with AddressSanitizer & UndefinedBehaviorSanitizer (`-fsanitize=address,undefined`).
+- **Verified Memory & Thread Safety:** 18 automated unit tests (`CTest`) verified in GitHub Actions CI under both AddressSanitizer/UBSan (`-fsanitize=address,undefined`) and ThreadSanitizer (`-fsanitize=thread`).
 
 ## How to Build & Run (Linux / WSL2)
 
@@ -54,12 +55,18 @@ kv-engine> STATS
 kv-engine> EXIT
 ```
 
-## Running Unit Tests (with AddressSanitizer)
+## Running Unit Tests (ASan/UBSan & ThreadSanitizer)
 
 ```bash
+# Memory & Undefined Behavior Check (ASan + UBSan)
 cmake -B build-asan -DENABLE_ASAN=ON
 cmake --build build-asan
 ctest --test-dir build-asan --output-on-failure
+
+# Data Race & Concurrency Check (TSan)
+cmake -B build-tsan -DENABLE_TSAN=ON
+cmake --build build-tsan
+ctest --test-dir build-tsan --output-on-failure
 ```
 
 ## Benchmarks
@@ -67,11 +74,15 @@ Measured on WSL2 Ubuntu (`g++ 15.2.0`, `-O3` Release build) via `./build-release
 
 | Operation | Count | Total Time | Throughput | Avg Latency |
 | :--- | :---: | :---: | :---: | :---: |
-| SET (in-memory) | 50,000 | 0.0261 s | 1,915,192 ops/s | 0.52 us |
-| GET (in-memory hit) | 50,000 | 0.0113 s | 4,414,688 ops/s | 0.23 us |
-| DEL (in-memory) | 50,000 | 0.0220 s | 2,275,773 ops/s | 0.44 us |
-| Snapshot Flush (1K) | 1,000 | 0.0003 s | 3,842,991 ops/s | 0.26 us |
+| SET (in-memory) | 100,000 | 0.1951 s | 512,509 ops/s | 1.95 us |
+| GET (in-memory hit) | 100,000 | 0.0799 s | 1,251,962 ops/s | 0.80 us |
+| DEL (in-memory) | 100,000 | 0.1129 s | 886,114 ops/s | 1.13 us |
+| Snapshot Flush (1K) | 1,000 | 0.0011 s | 904,153 ops/s | 1.11 us |
+| 8T Mixed (1-Mutex) | 200,000 | 0.4628 s | 432,148 ops/s | 2.31 us |
+| **8T Mixed (16-Shards)** | **200,000** | **0.1484 s** | **1,347,773 ops/s** | **0.74 us** |
 
-## Known Limitations (v1.0.0)
-- Single-threaded local execution (`std::shared_mutex` concurrency and TCP client-server protocol planned for v2.0).
-- Full snapshot rewrite on interactive mutations (append-only WAL planned for v2.0).
+> Lock striping across 16 cache-aligned shards delivers a **3.12x concurrent throughput speedup** and **~68% lower average latency** compared to a single global mutex under an 8-thread mixed (80% GET / 20% SET) workload.
+
+## Roadmap (Planned for v2.0)
+- **Append-Only WAL & Compaction:** Replace full-snapshot rewrites on interactive mutations with crash-safe write-ahead logging.
+- **POSIX TCP Server:** Expose the sharded engine over a lightweight localhost client-server protocol.
