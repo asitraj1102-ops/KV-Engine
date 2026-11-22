@@ -1,6 +1,7 @@
 build/
 build-release/
 build-asan/
+build-tsan/
 output/
 *.o
 *.out
